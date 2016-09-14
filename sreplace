@@ -1,0 +1,123 @@
+#!/bin/bash
+
+# Function for Usage display
+Usage() {
+cat <<EOF
+    usage: $0 [OPTIONS] PATTERN STRING
+
+    Find and replace string against all files within a given path.
+    Logs output for diff comparison.
+
+    OPTIONS:
+        -h      Show this message
+        -p      Path to search (default is PWD)
+        -d      Depth of directory search (integer)
+EOF
+}
+# Set default optargs, and prompt for optarg input
+DEPTH=
+FPATH=$PWD
+while getopts "hp:d:" OPTION
+do
+    case $OPTION in
+        h)   
+            Usage
+            exit 1
+            ;;
+        p)   
+            FPATH=$OPTARG
+            if [[ ! -e $FPATH ]]; then
+                echo "ERROR: -p $FPATH"
+                echo " -p value is not a valid directory or file"
+                Usage
+                exit 1
+            fi
+            ;;
+        d)   
+            DEPTH=$OPTARG
+            if [[ ! $DEPTH =~ ^[0-9]+$ ]]; then
+                echo "ERROR: -d $DEPTH"
+                echo "  -d value must be a number"
+                Usage
+                exit 1
+            fi
+            ;;
+        :)   
+            echo " Option -$OPTARG requires a value." >&2
+            exit 1
+            ;;
+        ?)   
+            Usage
+            exit
+            ;;
+    esac
+done
+# Set positional arguments back to 1 after taking optargs
+shift $((OPTIND-1))
+PATTERN="$1"
+STRING="$2"
+# Append DEPTH to `find -d` optarg, else unset DEPTH
+if [[ -n $DEPTH ]]; then
+    DEPTH="-maxdepth $DEPTH"
+else
+    DEPTH=
+fi
+# Require search and replace arguments
+if [[ -z $PATTERN ]] || [[ -z $STRING ]]; then
+    Usage
+    exit 1
+fi
+# Transform search and replace arguments to REGEX string
+REG_PATTERN="$(echo "$PATTERN" | sed 's/\(\/\)/\\\//g')"
+REG_STRING="$(echo "$STRING" | sed 's/\(\/\)/\\\//g')"
+# Vars for XDG_DATA_HOME compliant logging directory
+LOGPATH="$HOME/.local/share/sreplace"
+LOGFILE="sreplace.log"
+LOG="$LOGPATH"/"$LOGFILE"
+# LogRotate function
+LogRotate () {
+    if [ -f "$LOG" ]; then
+        CNT=20
+        let P_CNT=CNT-1
+            if [ -f "${LOG}".20 ]; then
+                rm "${LOG}".20
+            fi
+        while [[ $CNT -ne 1 ]]; do
+            if [ -f "${LOG}".${P_CNT} ]; then
+                mv "${LOG}".${P_CNT} "${LOG}".${CNT}
+            fi
+        let CNT=CNT-1
+        let P_CNT=P_CNT-1
+        done
+        mv "$LOG" "${LOG}".1
+        echo "" > "$LOG"
+    fi
+}
+# Inspect LOGPATH and LOGFILE, create and rotate if needed
+if [[ ! -f $LOG ]]; then
+    mkdir -p "$LOGPATH"
+    touch "$_"/"$LOGFILE"
+else
+    LogRotate
+fi
+# Loop through files in path, grep PATTERN and log to before, find/replace string
+# grep STRING and log to after
+TMPIN=$(mktemp)
+TMPOUT=$(mktemp)
+TMPLOG=$(mktemp)
+FOUND=$(find "$FPATH" $DEPTH -type f)
+for FILE in $FOUND; do
+    grep --color=always -Eon "$REG_PATTERN" "$FILE" /dev/null >> "$TMPIN"    
+    sed -i 's/'"$REG_PATTERN"'/'"$REG_STRING"'/g' "$FILE"
+    if [[ $(wc -l < "$TMPIN") -ne 0 ]]; then
+        grep --color=always -Eon "$REG_STRING" "$FILE" /dev/null >> "$TMPOUT"
+    fi
+done
+# Combine before and after pattern outputs into single file and remove mktemp files
+paste -d' ' "$TMPIN" "$TMPOUT" | sed -e 's/ / -➤ /g' > "$LOG"
+paste -d' ' "$TMPIN" "$TMPOUT" > "$TMPLOG"
+LCOUNT=$(uniq "$TMPLOG" | wc -l)
+CCOUNT=$(wc -l < "$TMPLOG")
+echo "$LCOUNT lines and $CCOUNT strings have been changed"
+echo "Output has been logged to $LOG"
+rm -rf "$TMPIN" "$TMPOUT" "$TMPLOG"
